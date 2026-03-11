@@ -1,0 +1,47 @@
+{
+  "name": "pi-redactor",
+  "version": "1.0.0",
+  "description": "Pi extension that redacts sensitive strings from messages before the LLM sees them",
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "redactor",
+    "redaction",
+    "privacy",
+    "security",
+    "llm"
+  ],
+  "author": "Vandern Rodrigues",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/nrednav/pi-redactor.git"
+  },
+  "homepage": "https://github.com/nrednav/pi-redactor#readme",
+  "bugs": {
+    "url": "https://github.com/nrednav/pi-redactor/issues"
+  },
+  "license": "MIT",
+  "engines": {
+    "node": ">=20"
+  },
+  "files": ["src", "CHANGELOG.md"],
+  "type": "module",
+  "pi": {
+    "extensions": [
+      "./src/index.ts"
+    ]
+  },
+  "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "devDependencies": {
+    "vitest": "^4.0.18",
+    "@vitest/coverage-v8": "^4.0.18",
+    "@fast-check/vitest": "^0.2.0",
+    "memfs": "^4.17.0"
+  },
+  "peerDependencies": {
+    "@mariozechner/pi-coding-agent": "*"
+  }
+}
