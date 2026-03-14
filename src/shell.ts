@@ -116,6 +116,7 @@ export async function loadConfig(): Promise<LoadResult> {
     const parsed: unknown = JSON.parse(rawFileContent);
 
     if (!isConfigEnvelope(parsed)) {
+      lastKnownConfigVersion = null;
       return {
         config: RedactorConfig.createDefault(),
         status: "recovered",
@@ -128,6 +129,7 @@ export async function loadConfig(): Promise<LoadResult> {
     const expectedChecksum = computeChecksum(serializedData);
 
     if (parsed.checksum !== expectedChecksum) {
+      lastKnownConfigVersion = null;
       const { config, warnings }: ConfigParseResult = RedactorConfig.parseJSON(parsed.data);
 
       return {
@@ -279,15 +281,16 @@ export async function interpretEffects(
           const wasAccepted = await context.ui.confirm(effect.title, effect.message);
 
           if (wasAccepted) {
-            // Apply deferred config change before downstream effects
-            // so updateStatus sees the updated state
-            onConfigChange(effect.confirmedOutcome.config);
-
             await interpretEffects(
               effect.confirmedOutcome.effects,
               context,
               onConfigChange
             );
+
+            // Only apply config change after all effects (including save) succeed.
+            // If save throws SaveFailedError, onConfigChange never fires,
+            // keeping in-memory config consistent with on-disk state.
+            onConfigChange(effect.confirmedOutcome.config);
           }
 
           break;

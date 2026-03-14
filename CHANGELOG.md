@@ -7,6 +7,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.1] - 2026-03-14
+
+### Added
+
+- `tool_result` event handler: redacts sensitive strings from tool output (file
+  reads, command output) before they enter the LLM context. Fail-closed on error
+  and replaces the result with a static error string.
+- `context` event handler: scans the full message history before each LLM call.
+  Redacts secrets in string content, array content blocks, and unsigned thinking
+  blocks. Fail-closed on error and returns empty messages.
+- `redactContent()` method on `RedactorConfig` for redacting `ContentBlock[]`
+  arrays. Text blocks are scanned and image blocks pass through unchanged.
+  `textSignature` is stripped from modified blocks to invalidate stale
+  signatures.
+- `ContentBlock` type union and `ContentRedactionResult` interface in `core.ts`.
+- `extractErrorReason()` helper in `index.ts` to deduplicate error-formatting
+  logic across handlers.
+- Integration test suite (`test/index.test.ts`) covering fail-closed behavior,
+  content redaction, and thinking-block handling for the extension entry point.
+
+### Changed
+
+- Documentation (`README.md`, `AGENTS.md`) updated to reflect the three-point
+  interception model (`input`, `tool_result`, `context`) and new limitations
+  (signed thinking blocks, `toolCall` arguments, TOCTOU window).
+
+### Fixed
+
+- Stale `lastKnownConfigVersion` after config recovery. `loadConfig()` now
+  resets the cached version to `null` on non-envelope and checksum-mismatch
+  recovery paths, preventing a `SaveFailedError` on the subsequent save.
+- `onConfigChange` firing before save in the confirm flow. `interpretEffects()`
+  now defers the callback until all child effects (including the atomic write)
+  succeed, keeping in-memory config consistent with on-disk state when save
+  fails.
+
+### Security
+
+- Dynamic error details (e.g., contract-violation conditions) are no longer
+  included in the LLM-visible `tool_result` error content. The fail-closed path
+  returns a static `"[REDACTED — internal redaction error]"` string. The
+  detailed reason is shown only via the local `notify()` UI channel.
+
 ## [1.0.0] - 2026-03-12
 
 ### Added
@@ -62,5 +105,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `input` event handler that intercepts messages before they reach the LLM
   provider.
 
-[unreleased]: https://github.com/nrednav/pi-redactor/compare/v1.0.0...HEAD
+[unreleased]: https://github.com/nrednav/pi-redactor/compare/v1.0.1...HEAD
+[1.0.1]: https://github.com/nrednav/pi-redactor/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/nrednav/pi-redactor/releases/tag/v1.0.0

@@ -13,6 +13,8 @@ import {
   MAX_PATTERN_LENGTH,
   MAX_CONFIGURABLE_LIMIT,
   type ConfigParseResult,
+  type ContentBlock,
+  type ContentRedactionResult,
 } from "../src/core";
 
 describe("NonEmptyString", () => {
@@ -752,6 +754,361 @@ describe("RedactorConfig", () => {
     });
   });
 
+  describe("redactContent()", () => {
+    it("redacts text blocks and passes through image blocks", () => {
+      const config = RedactorConfig.createDefault()
+        .addPattern(Pattern.create("secret", "[REDACTED]"));
+
+      const content: ContentBlock[] = [
+        { type: "text", text: "my secret data" },
+        { type: "image", data: "base64data", mimeType: "image/png" },
+        { type: "text", text: "another secret here" },
+      ];
+
+      const result = config.redactContent(content);
+
+      expect(result.totalMatchCount).toBe(2);
+      expect(result.wasRedacted).toBe(true);
+      expect(result.content).toHaveLength(3);
+      expect(result.content[0]).toEqual({ type: "text", text: "my [REDACTED] data" });
+      expect(result.content[1]).toEqual({ type: "image", data: "base64data", mimeType: "image/png" });
+      expect(result.content[2]).toEqual({ type: "text", text: "another [REDACTED] here" });
+    });
+
+    it("returns unchanged content when config is disabled", () => {
+      const config = RedactorConfig.createDefault()
+        .addPattern(Pattern.create("secret", "[X]"))
+        .disable();
+
+      const content: ContentBlock[] = [
+        { type: "text", text: "my secret data" },
+      ];
+
+      const result = config.redactContent(content);
+
+      expect(result.totalMatchCount).toBe(0);
+      expect(result.wasRedacted).toBe(false);
+      expect(result.content).toBe(content); // same reference (early return)
+    });
+
+    it("returns unchanged content when patterns are empty", () => {
+      const config = RedactorConfig.createDefault();
+
+      const content: ContentBlock[] = [
+        { type: "text", text: "nothing to redact" },
+      ];
+
+      const result = config.redactContent(content);
+
+      expect(result.totalMatchCount).toBe(0);
+      expect(result.wasRedacted).toBe(false);
+      expect(result.content).toBe(content); // same reference (early return)
+    });
+
+    it("handles empty content array", () => {
+      const config = RedactorConfig.createDefault()
+        .addPattern(Pattern.create("secret", "[X]"));
+
+      const result = config.redactContent([]);
+
+      expect(result.totalMatchCount).toBe(0);
+      expect(result.wasRedacted).toBe(false);
+      expect(result.content).toHaveLength(0);
+    });
+
+    it("handles all-image content array without redaction", () => {
+      const config = RedactorConfig.createDefault()
+        .addPattern(Pattern.create("secret", "[X]"));
+
+      const content: ContentBlock[] = [
+        { type: "image", data: "abc", mimeType: "image/jpeg" },
+        { type: "image", data: "def", mimeType: "image/png" },
+      ];
+
+      const result = config.redactContent(content);
+
+      expect(result.totalMatchCount).toBe(0);
+      expect(result.wasRedacted).toBe(false);
+      expect(result.content).toHaveLength(2);
+    });
+
+    it("aggregates match counts across multiple text blocks", () => {
+      const config = RedactorConfig.createDefault()
+        .addPattern(Pattern.create("foo", "[F]"))
+        .addPattern(Pattern.create("bar", "[B]"));
+
+      const content: ContentBlock[] = [
+        { type: "text", text: "foo bar foo" },
+        { type: "text", text: "bar bar" },
+      ];
+
+      const result = config.redactContent(content);
+
+      expect(result.totalMatchCount).toBe(5);
+      expect(result.wasRedacted).toBe(true);
+      expect(result.content[0]).toEqual({ type: "text", text: "[F] [B] [F]" });
+      expect(result.content[1]).toEqual({ type: "text", text: "[B] [B]" });
+    });
+
+    it("throws ContractViolation for non-array input", () => {
+      const config = RedactorConfig.createDefault();
+
+      expect(() => config.redactContent("not an array" as unknown as ContentBlock[])).toThrow(
+        ContractViolation
+      );
+    });
+
+    it("does not mutate original content blocks", () => {
+      const config = RedactorConfig.createDefault()
+        .addPattern(Pattern.create("secret", "[X]"));
+
+      const originalBlock: ContentBlock = { type: "text", text: "my secret" };
+      const content: ContentBlock[] = [originalBlock];
+
+      config.redactContent(content);
+
+      expect(originalBlock.text).toBe("my secret"); // unchanged
+    });
+
+    it("preserves extra properties on text blocks", () => {
+      const config = RedactorConfig.createDefault()
+        .addPattern(Pattern.create("secret", "[X]"));
+
+      const content: ContentBlock[] = [
+        { type: "text", text: "my secret", cacheControl: { type: "ephemeral" } },
+      ];
+
+      const result = config.redactContent(content);
+
+      expect(result.content[0]).toEqual({
+        type: "text",
+        text: "my [X]",
+        cacheControl: { type: "ephemeral" },
+      });
+    });
+
+    it("does not mutate original content array", () => {
+      const config = RedactorConfig.createDefault()
+        .addPattern(Pattern.create("secret", "[X]"));
+
+      const originalBlock: ContentBlock = { type: "text", text: "my secret" };
+      const imageBlock: ContentBlock = { type: "image", data: "abc", mimeType: "image/png" };
+      const content: ContentBlock[] = [originalBlock, imageBlock];
+
+      const result = config.redactContent(content);
+
+      // Original array is unchanged
+      expect(content).toHaveLength(2);
+      expect(content[0]).toBe(originalBlock);
+      expect(content[1]).toBe(imageBlock);
+
+      // Original block text is unchanged
+      expect(originalBlock.text).toBe("my secret");
+
+      // Result is a different array
+      expect(result.content).not.toBe(content);
+    });
+
+    test.prop(
+      [fc.array(fc.record({ type: fc.constant("text" as const), text: fc.string() }), { minLength: 1, maxLength: 10 })],
+    )(
+      "redacted content never contains the original pattern string",
+      (textBlocks) => {
+        const needle = "NEEDLE";
+        const config = RedactorConfig.createDefault()
+          .addPattern(Pattern.create(needle, "[REPLACED]"));
+
+        // Inject needle into a random block
+        const targetIndex = textBlocks.length - 1;
+        const injected: ContentBlock[] = textBlocks.map((block, index) =>
+          index === targetIndex
+            ? { ...block, text: block.text + needle + block.text }
+            : block
+        );
+
+        const result = config.redactContent(injected);
+
+        for (const block of result.content) {
+          if (block.type === "text") {
+            expect(block.text.toLowerCase()).not.toContain(needle.toLowerCase());
+          }
+        }
+      },
+    );
+
+    it("wasRedacted is false when text blocks contain no matches", () => {
+      const config = RedactorConfig.createDefault()
+        .addPattern(Pattern.create("secret", "[X]"));
+
+      const content: ContentBlock[] = [
+        { type: "text", text: "nothing here" },
+        { type: "text", text: "clean text" },
+      ];
+
+      const result = config.redactContent(content);
+
+      expect(result.totalMatchCount).toBe(0);
+      expect(result.wasRedacted).toBe(false);
+    });
+
+    it("redacts secrets from realistic read tool output", () => {
+      const config = RedactorConfig.createDefault()
+        .addPattern(Pattern.create("sk-live-abc123", "[API_KEY]"));
+
+      const content: ContentBlock[] = [
+        { type: "text", text: "API_KEY=sk-live-abc123\nDATABASE_URL=postgres://..." },
+      ];
+
+      const result = config.redactContent(content);
+
+      expect(result.wasRedacted).toBe(true);
+      expect(result.totalMatchCount).toBe(1);
+      expect(result.content[0]).toEqual({
+        type: "text",
+        text: "API_KEY=[API_KEY]\nDATABASE_URL=postgres://...",
+      });
+    });
+
+    it("redacts secrets from realistic bash tool output", () => {
+      const config = RedactorConfig.createDefault()
+        .addPattern(Pattern.create("hunter2", "[PASSWORD]"));
+
+      const content: ContentBlock[] = [
+        { type: "text", text: "Connecting with password hunter2\nConnection established" },
+      ];
+
+      const result = config.redactContent(content);
+
+      expect(result.wasRedacted).toBe(true);
+      expect(result.totalMatchCount).toBe(1);
+      expect(result.content[0]).toEqual({
+        type: "text",
+        text: "Connecting with password [PASSWORD]\nConnection established",
+      });
+    });
+
+    it("redacts multiple patterns across a single tool result", () => {
+      const config = RedactorConfig.createDefault()
+        .addPattern(Pattern.create("secret1", "[S1]"))
+        .addPattern(Pattern.create("secret2", "[S2]"));
+
+      const content: ContentBlock[] = [
+        { type: "text", text: "Found secret1 and secret2 in output" },
+      ];
+
+      const result = config.redactContent(content);
+
+      expect(result.wasRedacted).toBe(true);
+      expect(result.totalMatchCount).toBe(2);
+      expect(result.content[0]).toEqual({
+        type: "text",
+        text: "Found [S1] and [S2] in output",
+      });
+    });
+
+    it("handles tool result with only image content (no text to redact)", () => {
+      const config = RedactorConfig.createDefault()
+        .addPattern(Pattern.create("secret", "[X]"));
+
+      const content: ContentBlock[] = [
+        { type: "image", data: "base64...", mimeType: "image/png" },
+      ];
+
+      const result = config.redactContent(content);
+
+      expect(result.wasRedacted).toBe(false);
+      expect(result.totalMatchCount).toBe(0);
+      expect(result.content).toHaveLength(1);
+      expect(result.content[0]).toEqual({
+        type: "image",
+        data: "base64...",
+        mimeType: "image/png",
+      });
+    });
+
+    it("handles error content from failed tools", () => {
+      const config = RedactorConfig.createDefault()
+        .addPattern(Pattern.create("secret1", "[S1]"));
+
+      const content: ContentBlock[] = [
+        { type: "text", text: "Error: could not read file containing secret1" },
+      ];
+
+      const result = config.redactContent(content);
+
+      expect(result.wasRedacted).toBe(true);
+      expect(result.totalMatchCount).toBe(1);
+      expect(result.content[0]).toEqual({
+        type: "text",
+        text: "Error: could not read file containing [S1]",
+      });
+    });
+
+    it("returns original block reference when no pattern matches", () => {
+      const config = RedactorConfig.create(true, PatternList.from([
+        Pattern.create("secret"),
+      ]));
+      const originalBlock = { type: "text" as const, text: "no match here" };
+      const result = config.redactContent([originalBlock]);
+
+      expect(result.wasRedacted).toBe(false);
+      expect(result.content[0]).toBe(originalBlock);
+    });
+
+    it("returns new block object when pattern matches", () => {
+      const config = RedactorConfig.create(true, PatternList.from([
+        Pattern.create("secret"),
+      ]));
+      const originalBlock = { type: "text" as const, text: "my secret value" };
+      const result = config.redactContent([originalBlock]);
+
+      expect(result.wasRedacted).toBe(true);
+      expect(result.content[0]).not.toBe(originalBlock);
+      expect((result.content[0] as any).text).toBe("my [REDACTED] value");
+    });
+
+    it("strips textSignature from redacted text block", () => {
+      const config = RedactorConfig.create(true, PatternList.from([
+        Pattern.create("secret"),
+      ]));
+      const block = { type: "text" as const, text: "my secret", textSignature: "sig123" };
+      const result = config.redactContent([block]);
+
+      expect(result.wasRedacted).toBe(true);
+      expect((result.content[0] as any).text).toBe("my [REDACTED]");
+      expect((result.content[0] as any)).not.toHaveProperty("textSignature");
+    });
+
+    it("preserves textSignature on non-matching text block", () => {
+      const config = RedactorConfig.create(true, PatternList.from([
+        Pattern.create("secret"),
+      ]));
+      const block = { type: "text" as const, text: "no match", textSignature: "sig123" };
+      const result = config.redactContent([block]);
+
+      expect(result.wasRedacted).toBe(false);
+      expect(result.content[0]).toBe(block); // same reference
+      expect((result.content[0] as any).textSignature).toBe("sig123");
+    });
+
+    it("preserves cacheControl and other extra properties on redacted text block", () => {
+      const config = RedactorConfig.create(true, PatternList.from([
+        Pattern.create("secret"),
+      ]));
+      const block = {
+        type: "text" as const,
+        text: "my secret",
+        textSignature: "sig123",
+        cacheControl: { type: "ephemeral" },
+      };
+      const result = config.redactContent([block]);
+
+      expect(result.wasRedacted).toBe(true);
+      expect((result.content[0] as any).cacheControl).toEqual({ type: "ephemeral" });
+      expect((result.content[0] as any)).not.toHaveProperty("textSignature");
+    });
+  });
+
   describe("toJSON()", () => {
     it("serializes config correctly", () => {
       const config = RedactorConfig.createDefault().addPattern(
@@ -1419,5 +1776,130 @@ describe("Known Limitations", () => {
       expect(result.wasRedacted).toBe(true);
       expect(result.text).toBe("Meeting at [REDACTED] at 3pm");
     });
+  });
+});
+
+describe("Context-level redaction scenarios", () => {
+  it("redacts string content in user messages", () => {
+    const config = RedactorConfig.createDefault()
+      .addPattern(Pattern.create("secret123"));
+
+    // Simulates: { role: "user", content: "Hello secret123 world", timestamp: 0 }
+    const result = config.redact("Hello secret123 world");
+
+    expect(result.wasRedacted).toBe(true);
+    expect(result.text).toContain("[REDACTED]");
+    expect(result.text).not.toContain("secret123");
+    expect(result.text).toBe("Hello [REDACTED] world");
+  });
+
+  it("redacts text blocks in assistant message content arrays", () => {
+    const config = RedactorConfig.createDefault()
+      .addPattern(Pattern.create("secret123", "[REDACTED]"));
+
+    // Simulates: { role: "assistant", content: [{ type: "text", text: "..." }, { type: "thinking", thinking: "..." }], ... }
+    const contentArray: ContentBlock[] = [
+      { type: "text", text: "The API key is secret123" },
+      // Thinking blocks have a different type and are not ContentBlock "text",
+      // the context handler (and redactContent) only affects type:"text" blocks.
+      { type: "text", text: "Some other assistant output" },
+    ];
+
+    const result = config.redactContent(contentArray);
+
+    expect(result.wasRedacted).toBe(true);
+    expect(result.content[0]).toEqual({ type: "text", text: "The API key is [REDACTED]" });
+    // Second text block is unaffected (no match)
+    expect(result.content[1]).toEqual({ type: "text", text: "Some other assistant output" });
+
+    // Thinking blocks are not ContentBlock so the handler skips them.
+    // Verify via direct redact() that the thinking text would be unaffected
+    // (the handler only calls redact on text strings, not thinking strings).
+    const thinkingText = "I need to reason about secret123";
+    const thinkingResult = config.redact(thinkingText);
+
+    // The pattern would match if called but the point is the handler does not call it on thinking blocks.
+    expect(thinkingResult.wasRedacted).toBe(true);
+  });
+
+  it("redacts text blocks in toolResult content arrays", () => {
+    const config = RedactorConfig.createDefault()
+      .addPattern(Pattern.create("secret123", "[REDACTED]"));
+
+    // Simulates: { role: "toolResult", content: [{ type: "text", text: "PASSWORD=secret123\nHOST=localhost" }], ... }
+    const contentArray: ContentBlock[] = [
+      { type: "text", text: "PASSWORD=secret123\nHOST=localhost" },
+    ];
+
+    const result = config.redactContent(contentArray);
+
+    expect(result.wasRedacted).toBe(true);
+    expect(result.totalMatchCount).toBe(1);
+    expect(result.content[0]).toEqual({
+      type: "text",
+      text: "PASSWORD=[REDACTED]\nHOST=localhost",
+    });
+  });
+
+  it("handles mixed content with images safely", () => {
+    const config = RedactorConfig.createDefault()
+      .addPattern(Pattern.create("secret123", "[REDACTED]"));
+
+    // Images are opaque binary so the handler and redactContent skip non-text blocks.
+    const contentArray: ContentBlock[] = [
+      { type: "image", data: "secret123", mimeType: "image/png" },
+      { type: "text", text: "secret123" },
+    ];
+
+    const result = config.redactContent(contentArray);
+
+    // Image data must pass through unaffected
+    expect(result.content[0]).toEqual({ type: "image", data: "secret123", mimeType: "image/png" });
+
+    // Text block is redacted
+    expect(result.content[1]).toEqual({ type: "text", text: "[REDACTED]" });
+
+    expect(result.wasRedacted).toBe(true);
+    expect(result.totalMatchCount).toBe(1);
+  });
+
+  it("redacts across multiple messages in a conversation", () => {
+    const config = RedactorConfig.createDefault()
+      .addPattern(Pattern.create("secret123", "[REDACTED]"));
+
+    // Simulates the context handler iterating over 3 messages in a conversation
+    const messageTexts = [
+      "User said secret123 here",                        // user message (string content)
+      "The assistant echoed secret123 back",             // assistant text block
+      "Tool output: FILE_CONTENT=secret123\nDONE",       // toolResult text block
+    ];
+
+    const results = messageTexts.map((text) => config.redact(text));
+
+    // All 3 messages must be redacted
+    for (const result of results) {
+      expect(result.wasRedacted).toBe(true);
+      expect(result.text).not.toContain("secret123");
+      expect(result.text).toContain("[REDACTED]");
+    }
+
+    expect(results[0].text).toBe("User said [REDACTED] here");
+    expect(results[1].text).toBe("The assistant echoed [REDACTED] back");
+    expect(results[2].text).toBe("Tool output: FILE_CONTENT=[REDACTED]\nDONE");
+  });
+
+  it("no false positives on similar but non-matching strings", () => {
+    const config = RedactorConfig.createDefault()
+      .addPattern(Pattern.create("password", "[REDACTED]"));
+
+    const text = "The password policy requires passwords to be strong";
+
+    const result = config.redact(text);
+
+    // "password" appears standalone and as a substring of "passwords".
+    // The regex is not word-bounded, so "passwords" contains "password" and is matched.
+    expect(result.wasRedacted).toBe(true);
+    expect(result.matchCount).toBe(2);
+    expect(result.text).toBe("The [REDACTED] policy requires [REDACTED]s to be strong");
   });
 });

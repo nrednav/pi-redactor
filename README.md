@@ -1,6 +1,6 @@
 # pi-redactor
 
-Pi extension that redacts sensitive strings from messages before the LLM provider receives them.
+Pi extension that redacts sensitive strings from user input, tool results, and context before the LLM sees them.
 
 ## Installation
 
@@ -16,11 +16,17 @@ pi install /path/to/pi-redactor
 
 ## How It Works
 
-The extension intercepts the `input` event before your message reaches the LLM. All configured patterns are applied using a single-pass regex with longest-match-first semantics. The transformed text is sent instead of the original.
+The extension intercepts messages at three points:
+
+1. **`input`** — rewrites your message before it reaches the LLM.
+2. **`tool_result`** — redacts tool output (file reads, command output, etc.) before it enters the conversation.
+3. **`context`** — scans the full message history immediately before each LLM call, catching secrets in historical context, assistant echoes, or custom messages.
+
+All configured patterns are applied using a single-pass regex with longest-match-first semantics. The transformed text is sent instead of the original.
 
 The LLM never sees the original sensitive strings.
 
-If redaction fails at runtime (e.g., a malformed pattern), the extension **fails closed**: the message is blocked from reaching the LLM, and an error notification is displayed. Disable the redactor with `/redact off` to bypass.
+If redaction fails at runtime (e.g., a malformed pattern), the extension **fails closed**: user messages are blocked, tool results are replaced with an error, and context is emptied. An error notification is displayed in each case. Disable the redactor with `/redact off` to bypass.
 
 ## Commands
 
@@ -64,7 +70,7 @@ Notification: `🔒 Redacted 2 occurrence(s) from your message`
 - **Case-insensitive:** `john smith` matches `John Smith`.
 - **Longest match wins:** If both `secret` and `secretkey` are patterns, the input `secretkey` matches the longer pattern. Patterns do not apply sequentially.
 - **Match order is deterministic:** Results are identical regardless of the order patterns were added.
-- **Fail-closed on error:** If redaction fails, the message is blocked — it never reaches the LLM.
+- **Fail-closed on error:** If redaction fails, the content is blocked — it never reaches the LLM unredacted. User messages return `handled`, tool results are replaced with an error, and context is emptied.
 - **Disabled on degraded config:** If the config file is corrupted or patterns could not be loaded, the redactor starts disabled. Run `/redact list` to review, then `/redact on` to re-enable.
 - **Default limit: 100 patterns.** Configurable up to 1000 via `/redact limit <n>`. Adding a pattern beyond the current limit produces an error.
 - **Maximum 1000 characters** per pattern (original and replacement).
@@ -134,9 +140,13 @@ The file uses an envelope format with integrity checking:
 ## Limitations
 
 - No expiration or automatic cleanup of stored patterns.
-- Performance may degrade as pattern count approaches the 1000 ceiling due to regex alternation size.
+- Performance may degrade as pattern count approaches the 1000 ceiling due to regex alternation size. Untested above 50 patterns at maximum character length.
 - `/redact list` displays the raw original strings in the local UI. These are the sensitive values being redacted. Do not use this command where the terminal output may be captured or shared.
 - Pattern matching uses `toLowerCase()` without Unicode normalization. Visually identical strings in different normal forms (NFC vs NFD) are treated as distinct patterns (e.g., `é` as U+00E9 vs U+0065 U+0301).
+- **Signed thinking blocks are not redacted.** The `context` handler scans unsigned thinking blocks, but blocks with a `thinkingSignature` are passed through unchanged. Modifying the thinking text would invalidate the cryptographic signature used by LLM providers for multi-turn thought chain continuity. Secrets that appeared in signed thinking blocks (from turns before a redaction pattern was configured) will persist in the conversation context.
+- **Redacted thinking blocks are opaque.** Blocks with `redacted: true` are encrypted payloads with no meaningful text to scan.
+- **ToolCall arguments are not redacted.** The `context` handler does not scan `type: "toolCall"` block arguments. The corresponding `ToolResultMessage` content is redacted.
+- **TOCTOU window in config saves.** Concurrent saves within milliseconds from separate processes can silently overwrite each other. This is bounded by the single-process Pi event model and is not expected to occur in normal usage.
 
 ## Development Disclosure
 

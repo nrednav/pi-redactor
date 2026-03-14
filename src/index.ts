@@ -4,8 +4,15 @@ import {
   RedactorConfig,
   executeCommand,
   parseCommand,
+  type ContentBlock,
 } from "./core";
 import { interpretEffects, loadConfig, updateStatus, SaveFailedError } from "./shell";
+
+function extractErrorReason(error: unknown): string {
+  return error instanceof ContractViolation
+    ? error.condition
+    : (error instanceof Error ? error.message : String(error));
+}
 
 export default function (pi: ExtensionAPI) {
   // Initialised to a safe default synchronously because session_start always
@@ -77,9 +84,7 @@ export default function (pi: ExtensionAPI) {
 
       return { action: "continue" };
     } catch (error) {
-      const reason = error instanceof ContractViolation
-        ? error.condition
-        : (error instanceof Error ? error.message : String(error));
+      const reason = extractErrorReason(error);
 
       context.ui.notify(
         `🛑 Message blocked — redaction failed: ${reason}. ` +
@@ -88,6 +93,128 @@ export default function (pi: ExtensionAPI) {
       );
 
       return { action: "handled" };
+    }
+  });
+
+  // Redact tool results (file reads, command output, etc.) before they enter
+  // the LLM context. Fail-closed: if redaction throws, replace the result
+  // with an error to prevent leaking raw content.
+  pi.on("tool_result", async (event, context) => {
+    try {
+      const result = config.redactContent(event.content as ContentBlock[]);
+
+      if (result.wasRedacted) {
+        context.ui.notify(
+          `🔒 Redacted ${result.totalMatchCount} occurrence(s) from ${event.toolName} result`,
+          "info"
+        );
+        return { content: result.content as typeof event.content };
+      }
+
+      return undefined; // no changes needed
+    } catch (error) {
+      const reason = extractErrorReason(error);
+
+      context.ui.notify(
+        `🛑 Tool result blocked — redaction failed: ${reason}. ` +
+        `Fix patterns with /redact list or disable with /redact off.`,
+        "error"
+      );
+
+      return {
+        content: [{ type: "text" as const, text: "[REDACTED — internal redaction error]" }],
+        isError: true,
+      };
+    }
+  });
+
+  // Redact all messages before each LLM call.
+  // Catches secrets in historical context, custom messages, or assistant echoes.
+  pi.on("context", async (event, context) => {
+    if (!config.isEnabled || config.patterns.isEmpty) {
+      return undefined;
+    }
+
+    try {
+      let totalRedacted = 0;
+
+      const messages = event.messages;
+
+      for (const message of messages) {
+        if (!("role" in message)) {
+          continue;
+        }
+
+        // Handle string content (UserMessage, CustomMessage)
+        if ("content" in message && typeof message.content === "string") {
+          const result = config.redact(message.content);
+
+          if (result.wasRedacted) {
+            (message as any).content = result.text;
+            totalRedacted += result.matchCount;
+          }
+
+          continue;
+        }
+
+        // Handle array content (UserMessage, AssistantMessage, ToolResultMessage, CustomMessage)
+        if ("content" in message && Array.isArray(message.content)) {
+          const result = config.redactContent(message.content as ContentBlock[]);
+
+          if (result.wasRedacted) {
+            (message as any).content = result.content;
+            totalRedacted += result.totalMatchCount;
+          }
+
+          // Redact unsigned thinking blocks in assistant messages.
+          //
+          // @limitation Signed blocks (thinkingSignature present) are left
+          // unaffected because modifying the thinking text would invalidate the
+          // provider's cryptographic signature for multi-turn continuity.
+          // Secrets in signed thinking blocks from turns before a pattern was
+          // configured will persist in context.
+          //
+          // @limitation Redacted blocks (redacted: true) are opaque encrypted
+          // payloads with no meaningful thinking text to scan.
+          for (const block of message.content as Array<Record<string, unknown>>) {
+            if (
+              block.type === "thinking" &&
+              typeof block.thinking === "string" &&
+              !block.thinkingSignature &&
+              !block.redacted
+            ) {
+              const thinkingResult = config.redact(block.thinking as string);
+
+              if (thinkingResult.wasRedacted) {
+                block.thinking = thinkingResult.text;
+                totalRedacted += thinkingResult.matchCount;
+              }
+            }
+          }
+        }
+      }
+
+      if (totalRedacted > 0) {
+        context.ui.notify(
+          `🔒 Redacted ${totalRedacted} occurrence(s) from conversation context`,
+          "info"
+        );
+
+        return { messages };
+      }
+
+      return undefined;
+    } catch (error) {
+      const reason = extractErrorReason(error);
+
+      context.ui.notify(
+        `🛑 Context redaction failed: ${reason}. Blocking LLM call. ` +
+        `Fix patterns with /redact list or disable with /redact off.`,
+        "error"
+      );
+
+      // Fail-closed: return empty messages to prevent sending unredacted context.
+      return { messages: [] };
     }
   });
 
@@ -120,7 +247,9 @@ export default function (pi: ExtensionAPI) {
         if (error instanceof ContractViolation) {
           context.ui.notify(`Invalid input: ${error.condition}`, "error");
         } else if (error instanceof SaveFailedError) {
-          // Save failed, config was not updated, state remains consistent
+          // Save failed, config was not updated, state remains consistent.
+          // For confirm-gated commands (e.g. clear), onConfigChange is deferred
+          // until after save succeeds, so this invariant holds in all paths.
         } else {
           throw error;
         }

@@ -1,7 +1,7 @@
 {
   "name": "pi-redactor",
-  "version": "1.0.0",
-  "description": "Pi extension that redacts sensitive strings from messages before the LLM sees them",
+  "version": "1.0.1",
+  "description": "Pi extension that redacts sensitive strings from user input, tool results, and context before the LLM sees them.",
   "keywords": [
     "pi-package",
     "pi-extension",
@@ -24,7 +24,10 @@
   "engines": {
     "node": ">=20"
   },
-  "files": ["src", "CHANGELOG.md"],
+  "files": [
+    "src",
+    "CHANGELOG.md"
+  ],
   "type": "module",
   "pi": {
     "extensions": [

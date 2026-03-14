@@ -1,6 +1,6 @@
 # AGENTS.md — pi-redactor
 
-Pi extension that redacts sensitive strings from user messages before the LLM receives them.
+Pi extension that redacts sensitive strings from user input, tool results, and context before the LLM sees them.
 
 ## Setup / Environment
 
@@ -25,7 +25,7 @@ No build step. Pi loads `./src/index.ts` directly via the `pi.extensions` field.
 |------|------|-------|
 | `src/core.ts` | **Functional Core** — pure logic, zero I/O | NO imports of `node:fs`, `node:os`, `node:path`, `node:net`, `node:child_process`, Pi SDK. NO `process.env`, `process.cwd`, `process.exit`, `console.*`, `setTimeout`, `fetch`. |
 | `src/shell.ts` | **Imperative Shell** — file I/O, platform paths, effect interpreter | Allowed to import Node built-ins and Pi SDK types. Imports from `./core`. |
-| `src/index.ts` | **Extension entry point** — wires events to core + shell | Registers Pi event handlers (`session_start`, `input`) and the `/redact` command. |
+| `src/index.ts` | **Extension entry point** — wires events to core + shell | Registers Pi event handlers (`session_start`, `input`, `tool_result`, `context`) and the `/redact` command. |
 
 Architectural boundary is enforced by `test/integrity.test.ts`. Do not violate it.
 
@@ -99,7 +99,7 @@ pi-redactor/
 
 ## Key Invariants
 
-- **Fail-closed.** If redaction throws, the message is blocked — never sent unredacted.
+- **Fail-closed.** If redaction throws, the content is blocked — never sent unredacted. User messages return `"handled"`, tool results are replaced with an error, and context is emptied.
 - **Single-pass regex.** `PatternList.redact()` uses one combined alternation. Longest match wins. Results are insertion-order-independent.
 - **Atomic writes.** `saveConfig` writes to `.tmp` then renames.
 - **Optimistic concurrency.** `configVersion` counter detects cross-session conflicts.

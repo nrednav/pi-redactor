@@ -439,6 +439,77 @@ describe("shell.ts", () => {
 
       expect(callOrder).toEqual(["save", "notify", "status"]);
     });
+
+    it("confirm accepted → save fails → onConfigChange is NOT called", async () => {
+      vi.mocked(fsp.mkdir).mockResolvedValue(undefined);
+      vi.mocked(fsp.writeFile).mockRejectedValue(new Error("Disk full"));
+      vi.mocked(fsp.access).mockRejectedValue(new Error("ENOENT"));
+
+      const ctx = createMockContext();
+
+      vi.mocked(ctx.ui.confirm).mockResolvedValue(true);
+
+      const onConfigChange = vi.fn();
+      const clearedConfig = RedactorConfig.createDefault();
+      const originalConfig = RedactorConfig.createDefault().addPattern(
+        Pattern.create("secret", "[X]")
+      );
+      const effects: Effect[] = [
+        {
+          type: "confirm",
+          title: "Clear all",
+          message: "Are you sure?",
+          confirmedOutcome: {
+            config: clearedConfig,
+            effects: [
+              { type: "notify", message: "Cleared!", level: "success" },
+              { type: "save", config: clearedConfig },
+              { type: "updateStatus", config: clearedConfig },
+            ],
+          },
+        },
+      ];
+
+      await expect(
+        interpretEffects(effects, ctx, onConfigChange)
+      ).rejects.toThrow(SaveFailedError);
+
+      expect(onConfigChange).not.toHaveBeenCalled();
+    });
+
+    it("confirm accepted → save succeeds → onConfigChange IS called with confirmed config", async () => {
+      vi.mocked(fsp.mkdir).mockResolvedValue(undefined);
+      vi.mocked(fsp.writeFile).mockResolvedValue(undefined);
+      vi.mocked(fsp.rename).mockResolvedValue(undefined);
+      vi.mocked(fsp.access).mockRejectedValue(new Error("ENOENT"));
+
+      const ctx = createMockContext();
+
+      vi.mocked(ctx.ui.confirm).mockResolvedValue(true);
+
+      const onConfigChange = vi.fn();
+      const clearedConfig = RedactorConfig.createDefault();
+      const effects: Effect[] = [
+        {
+          type: "confirm",
+          title: "Clear all",
+          message: "Are you sure?",
+          confirmedOutcome: {
+            config: clearedConfig,
+            effects: [
+              { type: "notify", message: "Cleared!", level: "success" },
+              { type: "save", config: clearedConfig },
+              { type: "updateStatus", config: clearedConfig },
+            ],
+          },
+        },
+      ];
+
+      await interpretEffects(effects, ctx, onConfigChange);
+
+      expect(onConfigChange).toHaveBeenCalledTimes(1);
+      expect(onConfigChange).toHaveBeenCalledWith(clearedConfig);
+    });
   });
 
   describe("Observability", () => {
@@ -829,6 +900,90 @@ describe("shell.ts", () => {
       vi.mocked(fsp.writeFile).mockResolvedValue(undefined);
       vi.mocked(fsp.rename).mockResolvedValue(undefined);
       vi.mocked(fsp.access).mockRejectedValue(new Error("ENOENT"));
+
+      await expect(saveConfig(RedactorConfig.createDefault())).resolves.toBeUndefined();
+    });
+  });
+
+  describe("Stale lastKnownConfigVersion after recovery", () => {
+    const crypto = require("node:crypto");
+
+    const makeEnvelope = (configVersion: number): string => {
+      const data = RedactorConfig.createDefault().toJSON();
+      const dataStr = JSON.stringify(data);
+      const checksum = crypto.createHash("sha256").update(dataStr).digest("hex");
+
+      return JSON.stringify({ version: 1, configVersion, checksum, data });
+    };
+
+    const makeEnvelopeWithBadChecksum = (configVersion: number): string => {
+      const data = RedactorConfig.createDefault().toJSON();
+
+      return JSON.stringify({
+        version: 1,
+        configVersion,
+        checksum: "0".repeat(64),
+        data,
+      });
+    };
+
+    const mockSuccessfulSave = () => {
+      vi.mocked(fsp.mkdir).mockResolvedValue(undefined);
+      vi.mocked(fsp.writeFile).mockResolvedValue(undefined);
+      vi.mocked(fsp.rename).mockResolvedValue(undefined);
+      vi.mocked(fsp.access).mockRejectedValue(new Error("ENOENT"));
+    };
+
+    it("load valid config (version 5) → load corrupted non-envelope → save succeeds", async () => {
+      // First load: valid envelope with configVersion 5
+      vi.mocked(fsp.readFile).mockResolvedValueOnce(makeEnvelope(5) as any);
+
+      const firstLoad = await loadConfig();
+
+      expect(firstLoad.status).toBe("ok");
+
+      // Second load: non-envelope JSON (corrupted externally)
+      vi.mocked(fsp.readFile).mockResolvedValueOnce(
+        JSON.stringify({ not: "an envelope" }) as any
+      );
+
+      const secondLoad = await loadConfig();
+
+      expect(secondLoad.status).toBe("recovered");
+
+      // Save: disk file is gone (ENOENT), should bootstrap fresh and not throw SaveFailedError
+      vi.mocked(fsp.readFile).mockRejectedValueOnce(
+        Object.assign(new Error("ENOENT"), { code: "ENOENT" })
+      );
+
+      mockSuccessfulSave();
+
+      await expect(saveConfig(RedactorConfig.createDefault())).resolves.toBeUndefined();
+    });
+
+    it("load valid config (version 5) → load checksum-mismatch → save succeeds", async () => {
+      // First load: valid envelope with configVersion 5
+      vi.mocked(fsp.readFile).mockResolvedValueOnce(makeEnvelope(5) as any);
+
+      const firstLoad = await loadConfig();
+
+      expect(firstLoad.status).toBe("ok");
+
+      // Second load: envelope structure but tampered checksum
+      vi.mocked(fsp.readFile).mockResolvedValueOnce(
+        makeEnvelopeWithBadChecksum(5) as any
+      );
+
+      const secondLoad = await loadConfig();
+
+      expect(secondLoad.status).toBe("recovered");
+
+      // Save: disk file is gone (ENOENT), should bootstrap fresh and not throw SaveFailedError
+      vi.mocked(fsp.readFile).mockRejectedValueOnce(
+        Object.assign(new Error("ENOENT"), { code: "ENOENT" })
+      );
+
+      mockSuccessfulSave();
 
       await expect(saveConfig(RedactorConfig.createDefault())).resolves.toBeUndefined();
     });

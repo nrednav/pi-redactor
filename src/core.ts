@@ -149,6 +149,16 @@ export class RedactionResult {
   }
 }
 
+export type ContentBlock =
+  | { type: "text"; text: string; [key: string]: unknown }
+  | { type: "image"; [key: string]: unknown };
+
+export interface ContentRedactionResult {
+  readonly content: ContentBlock[];
+  readonly totalMatchCount: number;
+  readonly wasRedacted: boolean;
+}
+
 export class PatternList {
   private readonly patternIndex: Map<string, Pattern>;
   // Invariant: single-threaded access assumed. The global flag makes this RegExp
@@ -458,6 +468,50 @@ export class RedactorConfig {
     }
 
     return this.patterns.redact(text);
+  }
+
+  /**
+   * Redacts text blocks in a content array. Image blocks pass through unchanged.
+   *
+   * @limitation Only processes `type: "text"` blocks. Other content block types
+   * (e.g., `type: "thinking"`, `type: "toolCall"`) are not scanned. Thinking block
+   * redaction is handled separately in the `context` event handler in `index.ts`.
+   */
+  redactContent(content: ContentBlock[]): ContentRedactionResult {
+    require(Array.isArray(content), "content must be an array", "RedactorConfig.redactContent");
+
+    if (!this.isEnabled || this.patterns.isEmpty) {
+      return { content, totalMatchCount: 0, wasRedacted: false };
+    }
+
+    let totalMatchCount = 0;
+
+    const redactedContent = content.map((block): ContentBlock => {
+      if (block.type === "text") {
+        const result = this.patterns.redact(block.text);
+
+        totalMatchCount += result.matchCount;
+
+        if (result.wasRedacted) {
+          // Strip textSignature when text is modified because the signature
+          // certifies the original text and becomes invalid after redaction.
+          // Other extra properties (e.g. cacheControl) are preserved via the
+          // rest spread.
+          const { textSignature, ...rest } = block as Record<string, unknown>;
+          return { ...rest, text: result.text } as ContentBlock;
+        }
+
+        return block;
+      }
+
+      return block;
+    });
+
+    return {
+      content: redactedContent,
+      totalMatchCount,
+      wasRedacted: totalMatchCount > 0,
+    };
   }
 
   toJSON(): {
