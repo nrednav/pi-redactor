@@ -13,7 +13,7 @@ vi.mock("node:fs/promises", () => ({
   unlink: vi.fn(),
 }));
 
-import { loadConfig, saveConfig, SaveFailedError, EffectError, interpretEffects, _resetConfigVersionForTesting, CONFIG_PATH } from "../src/shell";
+import { loadConfig, saveConfig, SaveFailedError, EffectError, interpretEffects, _resetConfigVersionForTesting, CONFIG_PATH, BACKUP_PATH } from "../src/shell";
 
 describe("shell.ts", () => {
   beforeEach(() => {
@@ -236,6 +236,77 @@ describe("shell.ts", () => {
       const config = RedactorConfig.createDefault();
 
       await expect(saveConfig(config)).rejects.toThrow("Write failed");
+    });
+  });
+
+  describe("Backup on save", () => {
+    const crypto = require("node:crypto");
+
+    const makeEnvelope = (configVersion: number): string => {
+      const data = RedactorConfig.createDefault().toJSON();
+      const dataStr = JSON.stringify(data);
+      const checksum = crypto.createHash("sha256").update(dataStr).digest("hex");
+
+      return JSON.stringify({ version: 1, configVersion, checksum, data });
+    };
+
+    const mockSuccessfulSave = () => {
+      vi.mocked(fsp.mkdir).mockResolvedValue(undefined);
+      vi.mocked(fsp.writeFile).mockResolvedValue(undefined);
+      vi.mocked(fsp.rename).mockResolvedValue(undefined);
+      vi.mocked(fsp.access).mockRejectedValue(new Error("ENOENT"));
+    };
+
+    it("backs up the previous config verbatim before overwriting", async () => {
+      const previousEnvelope = makeEnvelope(5);
+
+      vi.mocked(fsp.readFile).mockResolvedValueOnce(previousEnvelope as any);
+      mockSuccessfulSave();
+
+      await saveConfig(RedactorConfig.createDefault());
+
+      const backupCall = vi.mocked(fsp.writeFile).mock.calls.find(
+        ([target]) => String(target) === BACKUP_PATH + ".tmp"
+      );
+
+      expect(backupCall).toBeDefined();
+      expect(backupCall![1]).toBe(previousEnvelope);
+
+      const backupRename = vi.mocked(fsp.rename).mock.calls.find(
+        ([, target]) => String(target) === BACKUP_PATH
+      );
+
+      expect(backupRename).toBeDefined();
+    });
+
+    it("does not write a backup when no previous config exists", async () => {
+      mockSuccessfulSave();
+
+      await saveConfig(RedactorConfig.createDefault());
+
+      const backupCall = vi.mocked(fsp.writeFile).mock.calls.find(
+        ([target]) => String(target).includes(".bak")
+      );
+
+      expect(backupCall).toBeUndefined();
+    });
+
+    it("refuses to save when the previous config cannot be backed up", async () => {
+      const previousEnvelope = makeEnvelope(5);
+
+      vi.mocked(fsp.readFile).mockResolvedValueOnce(previousEnvelope as any);
+      vi.mocked(fsp.mkdir).mockResolvedValue(undefined);
+      vi.mocked(fsp.rename).mockResolvedValue(undefined);
+      vi.mocked(fsp.access).mockRejectedValue(new Error("ENOENT"));
+      vi.mocked(fsp.writeFile).mockRejectedValueOnce(new Error("ENOSPC: no space left"));
+
+      await expect(saveConfig(RedactorConfig.createDefault())).rejects.toThrow(SaveFailedError);
+
+      const configWrite = vi.mocked(fsp.writeFile).mock.calls.find(
+        ([target]) => String(target) === CONFIG_PATH + ".tmp"
+      );
+
+      expect(configWrite).toBeUndefined();
     });
   });
 

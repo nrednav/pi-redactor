@@ -47,6 +47,13 @@ function getStateDir(): string {
 export const CONFIG_PATH = path.join(getStateDir(), "pi-redactor", "config.json");
 
 /**
+ * Previous-version backup of the live config. Written before every overwrite
+ * so a destructive save can be reversed. Holds the raw envelope verbatim, so
+ * restoring it (copying it over CONFIG_PATH) still passes checksum validation.
+ */
+export const BACKUP_PATH = CONFIG_PATH + ".bak";
+
+/**
  * - "ok": Config loaded from existing file.
  * - "default": No config file exists (first run).
  * - "recovered": Config file was corrupted or unreadable.
@@ -168,24 +175,66 @@ export async function loadConfig(): Promise<LoadResult> {
 }
 
 /**
+ * Writes `content` to `filePath` atomically (temp file then rename) and
+ * removes the temp file on failure. Shared by the live config write and the
+ * previous-version backup so both are crash-safe.
+ */
+async function writeFileAtomic(filePath: string, content: string): Promise<void> {
+  const tempPath = filePath + ".tmp";
+
+  await fsp.mkdir(path.dirname(filePath), { recursive: true });
+
+  try {
+    await fsp.writeFile(tempPath, content, "utf-8");
+    await fsp.rename(tempPath, filePath);
+  } finally {
+    try {
+      await fsp.access(tempPath);
+      await fsp.unlink(tempPath);
+    } catch {
+      // Temp file already gone or never created, nothing to clean up
+    }
+  }
+}
+
+/**
  * Atomic write: writes to a temp file then renames to prevent corruption
  * if the process is killed mid-write.
+ *
+ * Before overwriting, the existing config is copied verbatim to BACKUP_PATH.
+ * The backup is fail-closed: if a previous config exists but the backup cannot
+ * be written, the save is refused so the only recoverable copy is not lost.
  *
  * Uses optimistic concurrency control via configVersion: if another process
  * wrote the file since this session last loaded it, throws SaveFailedError.
  */
 export async function saveConfig(config: RedactorConfig): Promise<void> {
+  let previousFileContent: string | null = null;
   let currentVersion = 0;
 
   try {
     const rawFileContent = await fsp.readFile(CONFIG_PATH, "utf-8");
-    const existing: unknown = JSON.parse(rawFileContent);
 
-    if (isConfigEnvelope(existing)) {
-      currentVersion = (existing.configVersion as number | undefined) ?? 0;
+    // Guard against a non-string result so a failed read cannot masquerade
+    // as existing content.
+    if (typeof rawFileContent === "string") {
+      previousFileContent = rawFileContent;
     }
   } catch {
-    // File absent or unreadable, currentVersion stays 0
+    // File absent or unreadable, previousFileContent stays null
+  }
+
+  if (previousFileContent !== null) {
+    try {
+      const existing: unknown = JSON.parse(previousFileContent);
+
+      if (isConfigEnvelope(existing)) {
+        currentVersion = (existing.configVersion as number | undefined) ?? 0;
+      }
+    } catch {
+      // Content is not valid JSON. Keep the version baseline at 0; the raw
+      // bytes are still backed up before the overwrite below.
+    }
   }
 
   // Only enforce when there is known baseline (fresh session always allows)
@@ -193,6 +242,22 @@ export async function saveConfig(config: RedactorConfig): Promise<void> {
     throw new SaveFailedError(
       "Config was modified by another session. Reload with /redact list and reapply changes."
     );
+  }
+
+  // Back up the previous config before overwriting. Fail closed: if a prior
+  // file exists but the backup cannot be written, refuse the save rather than
+  // destroy the only recoverable copy. The raw envelope bytes are preserved
+  // verbatim so a restore still passes checksum validation.
+  if (previousFileContent !== null) {
+    try {
+      await writeFileAtomic(BACKUP_PATH, previousFileContent);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+
+      throw new SaveFailedError(
+        `Refusing to save: could not back up the existing config. ${message}`
+      );
+    }
   }
 
   const newVersion = currentVersion + 1;
@@ -204,21 +269,8 @@ export async function saveConfig(config: RedactorConfig): Promise<void> {
     checksum: computeChecksum(serializedData),
     data,
   };
-  const tempPath = CONFIG_PATH + ".tmp";
 
-  await fsp.mkdir(path.dirname(CONFIG_PATH), { recursive: true });
-
-  try {
-    await fsp.writeFile(tempPath, JSON.stringify(envelope, null, 2), "utf-8");
-    await fsp.rename(tempPath, CONFIG_PATH);
-  } finally {
-    try {
-      await fsp.access(tempPath);
-      await fsp.unlink(tempPath);
-    } catch {
-      // Temp file already gone or never created, nothing to clean up
-    }
-  }
+  await writeFileAtomic(CONFIG_PATH, JSON.stringify(envelope, null, 2));
 
   lastKnownConfigVersion = newVersion;
 }

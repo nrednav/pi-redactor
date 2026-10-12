@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-10-12
+
+### Added
+
+- Previous-version config backup. Before each successful save, the existing
+  config is copied verbatim to `config.json.bak` beside the live file. Restore
+  with a single copy (`cp config.json.bak config.json`). The raw envelope bytes
+  are preserved, so a restored file still passes checksum validation.
+
+### Fixed
+
+- Test isolation. The integrity tests unlinked the live `CONFIG_PATH`, which
+  destroyed the user's real config, and under a Docker bind-mount the host
+  file. `vitest.config.ts` plus `test/setup.ts` now redirect `XDG_STATE_HOME` to
+  an ephemeral temp directory before `src/shell.ts` binds `CONFIG_PATH`, and
+  `test/integrity.test.ts` carries a hard fuse that aborts if `CONFIG_PATH`
+  ever resolves under the real state directory.
+
+### Changed
+
+- `saveConfig` is fail-closed when the backup write fails. It refuses to
+  overwrite an existing config that it could not back up.
+
 ## [1.1.0] - 2026-10-12
 
 ### Added

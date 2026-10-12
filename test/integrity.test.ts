@@ -1,10 +1,11 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import * as fs from "node:fs";
 import * as fsp from "node:fs/promises";
+import * as os from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { RedactorConfig, Pattern } from "../src/core";
-import { saveConfig, loadConfig, CONFIG_PATH, _resetConfigVersionForTesting } from "../src/shell";
+import { saveConfig, loadConfig, CONFIG_PATH, BACKUP_PATH, _resetConfigVersionForTesting } from "../src/shell";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const srcDir = path.join(__dirname, "../src");
@@ -128,13 +129,36 @@ describe("Cellular Integrity (Purity Check)", () => {
 });
 
 describe("Runtime Integrity — Tampering Detection", () => {
+  // Hard fuse: refuse fs operations against the user's real state dir.
+  // test/setup.ts should have redirected XDG_STATE_HOME to a temp dir so
+  // CONFIG_PATH resolves there; if it ever resolves into the real live
+  // state dir (~/.local/state), the beforeEach/afterEach fsp.unlink would
+  // clobber the user's actual config — and under a docker bind-mount, the
+  // file on the host. Fail loudly rather than silently destroy data.
+  const realStateDir = path.join(os.homedir(), ".local", "state");
+
+  const assertNotRealStateDir = (): void => {
+    if (CONFIG_PATH.startsWith(realStateDir)) {
+      throw new Error(
+        `Refusing fs operation: CONFIG_PATH (${CONFIG_PATH}) ` +
+        `targets the real user state dir (${realStateDir}). ` +
+        `Set XDG_STATE_HOME to a temp dir before importing src/shell ` +
+        `(see test/setup.ts). Aborting to prevent data loss.`
+      );
+    }
+  };
+
   beforeEach(async () => {
+    assertNotRealStateDir();
     _resetConfigVersionForTesting();
     try { await fsp.unlink(CONFIG_PATH); } catch { /* file may not exist */ }
+    try { await fsp.unlink(BACKUP_PATH); } catch { /* file may not exist */ }
   });
 
   afterEach(async () => {
+    assertNotRealStateDir();
     try { await fsp.unlink(CONFIG_PATH); } catch { /* best-effort cleanup */ }
+    try { await fsp.unlink(BACKUP_PATH); } catch { /* best-effort cleanup */ }
   });
 
   it("detects config tampering via checksum mismatch", async () => {
@@ -178,5 +202,27 @@ describe("Runtime Integrity — Tampering Detection", () => {
     expect(result.config.patterns.length).toBe(2);
     expect(result.config.patterns.toArray()[0].original.raw).toBe("alpha");
     expect(result.config.patterns.toArray()[1].original.raw).toBe("beta");
+  });
+
+  it("keeps a loadable previous-version backup before overwriting", async () => {
+    await saveConfig(
+      RedactorConfig.createDefault().addPattern(Pattern.create("first", "[1]"))
+    );
+    await saveConfig(
+      RedactorConfig.createDefault().addPattern(Pattern.create("second", "[2]"))
+    );
+
+    // The live config holds the most recent save.
+    const live = await loadConfig();
+
+    expect(live.status).toBe("ok");
+    expect(live.config.patterns.toArray()[0].original.raw).toBe("second");
+
+    // The backup holds the previous save, verbatim and checksum-valid.
+    const backupRaw = await fsp.readFile(BACKUP_PATH, "utf-8");
+    const backup = JSON.parse(backupRaw);
+
+    expect(backup.data.patterns).toHaveLength(1);
+    expect(backup.data.patterns[0].original).toBe("first");
   });
 });

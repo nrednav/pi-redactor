@@ -139,6 +139,17 @@ The file uses an envelope format with integrity checking:
 - **Optimistic concurrency control.** Each save increments `configVersion`. If another pi session modified the file since this session last read it, the save fails with an error instructing the user to reload.
 - **Atomic writes.** Saves write to a temporary file and rename, preventing corruption from interrupted writes.
 - **Degraded config recovery.** If the config file is corrupted, unreadable, or has dropped patterns, the extension starts with the redactor disabled and displays a warning. The user must explicitly re-enable after reviewing.
+- **Previous-version backup.** Before each successful save, the existing config is copied verbatim to `config.json.bak` beside the live file. The backup is fail-closed: if an existing config cannot be backed up, the save is refused so the only recoverable copy is not lost.
+
+### Backup and Recovery
+
+Every successful save first writes the previous config to `config.json.bak`. To restore it, copy it over the live file and restart the session:
+
+```sh
+cp ~/.local/state/pi-redactor/config.json.bak ~/.local/state/pi-redactor/config.json
+```
+
+The backup preserves the raw envelope, including its checksum, so the restored file loads without a tamper warning. The backup is a single generation: the next save replaces it.
 
 ## Limitations
 
