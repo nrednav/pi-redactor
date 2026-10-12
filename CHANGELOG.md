@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-10-12
+
+### Added
+
+- `staleWarningDays` config field to control the stale-pattern warning cadence.
+  The default is `90` days. A value of `0` disables the warning entirely.
+- `/redact stale <n>` command to set the stale-pattern warning age in days.
+  `0` disables the warning. Mirrors the `/redact limit <n>` command.
+
+### Changed
+
+- Stale-pattern warnings are now suppressed when `staleWarningDays` is `0`, and
+  the warning message reports the configured threshold instead of a hardcoded
+  90 days.
+- `RedactorConfig.parseJSON` reads and validates `staleWarningDays` (clamps
+  negative or fractional values to a non-negative integer and reports a
+  warning). `RedactorConfig.toJSON` persists it.
+
+### Notes
+
+- The `staleWarningDays` field is forward-compatible: a 1.0.x reader ignores the
+  unknown field and falls back to the default 90 days. Saving from a 1.0.x
+  reader drops the field.
+
 ## [1.0.1] - 2026-03-14
 
 ### Added

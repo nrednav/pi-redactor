@@ -41,6 +41,7 @@ If redaction fails at runtime (e.g., a malformed pattern), the extension **fails
 | `/redact on` | Enable redaction |
 | `/redact off` | Disable redaction |
 | `/redact limit <n>` | Set max pattern count (default 100, max 1000) |
+| `/redact stale <n>` | Set stale warning age in days (default 90, `0` disables) |
 
 ### Parsing Rule
 
@@ -74,7 +75,7 @@ Notification: `🔒 Redacted 2 occurrence(s) from your message`
 - **Disabled on degraded config:** If the config file is corrupted or patterns could not be loaded, the redactor starts disabled. Run `/redact list` to review, then `/redact on` to re-enable.
 - **Default limit: 100 patterns.** Configurable up to 1000 via `/redact limit <n>`. Adding a pattern beyond the current limit produces an error.
 - **Maximum 1000 characters** per pattern (original and replacement).
-- **Stale pattern warnings.** At session start, a warning is shown if any patterns were added more than 90 days ago.
+- **Stale pattern warnings.** At session start, a warning is shown if any patterns were added more than `staleWarningDays` days ago (default 90). Set the threshold with `/redact stale <n>`. A value of `0` disables the warning.
 
 ## Status Bar
 
@@ -108,6 +109,7 @@ The file uses an envelope format with integrity checking:
   "data": {
     "enabled": true,
     "maxPatterns": 100,
+    "staleWarningDays": 90,
     "patterns": [
       {
         "original": "John Smith",
@@ -126,6 +128,7 @@ The file uses an envelope format with integrity checking:
 | `checksum` | SHA-256 hex digest of `JSON.stringify(data)`. Used for tamper detection. |
 | `data.enabled` | Whether redaction is active. |
 | `data.maxPatterns` | Maximum number of patterns allowed. Default `100`, max `1000`. |
+| `data.staleWarningDays` | Review cadence for the stale-pattern warning, in days. `0` disables the warning. Default `90`. |
 | `data.patterns[].original` | The original string to redact. |
 | `data.patterns[].replacement` | The replacement label. |
 | `data.patterns[].createdAt` | Unix timestamp in milliseconds when the pattern was added. |

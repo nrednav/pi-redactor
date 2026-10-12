@@ -55,13 +55,16 @@ export default function (pi: ExtensionAPI) {
       );
     }
 
-    const stalePatterns = config.patterns.getStalePatterns(90);
+    // staleWarningDays of 0 disables the warning entirely.
+    if (config.staleWarningDays > 0) {
+      const stalePatterns = config.patterns.getStalePatterns(config.staleWarningDays);
 
-    if (stalePatterns.length > 0) {
-      context.ui.notify(
-        `⚠️ ${stalePatterns.length} pattern(s) added over 90 days ago. Run /redact list to review.`,
-        "warning"
-      );
+      if (stalePatterns.length > 0) {
+        context.ui.notify(
+          `⚠️ ${stalePatterns.length} pattern(s) added over ${config.staleWarningDays} days ago. Run /redact list to review.`,
+          "warning"
+        );
+      }
     }
 
     updateStatus(config, context);

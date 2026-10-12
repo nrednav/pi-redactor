@@ -220,4 +220,45 @@ describe("index.ts — extension integration", () => {
     expect(messages[0].content[0].thinking).toBe("");
     expect(messages[0].content[0].redacted).toBe(true);
   });
+
+  // Stale pattern warning
+  it("session_start: shows stale warning when a pattern exceeds staleWarningDays", async () => {
+    const oldTimestamp = Date.now() - 91 * 24 * 60 * 60 * 1000;
+
+    vi.mocked(loadConfig).mockResolvedValue({
+      config: RedactorConfig.create(
+        true,
+        PatternList.from([Pattern.create("old", "[X]", oldTimestamp)]),
+      ),
+      status: "ok" as const,
+      patternWarnings: [],
+    });
+
+    await handlers["session_start"]({}, mockContext);
+
+    expect(mockContext.ui.notify).toHaveBeenCalledWith(
+      expect.stringContaining("pattern(s) added over 90 days ago"),
+      "warning",
+    );
+  });
+
+  it("session_start: suppresses stale warning when staleWarningDays is 0", async () => {
+    const oldTimestamp = Date.now() - 91 * 24 * 60 * 60 * 1000;
+
+    vi.mocked(loadConfig).mockResolvedValue({
+      config: RedactorConfig.create(
+        true,
+        PatternList.from([Pattern.create("old", "[X]", oldTimestamp)]),
+      ).setStaleWarningDays(0),
+      status: "ok" as const,
+      patternWarnings: [],
+    });
+
+    await handlers["session_start"]({}, mockContext);
+
+    expect(mockContext.ui.notify).not.toHaveBeenCalledWith(
+      expect.stringContaining("added over"),
+      "warning",
+    );
+  });
 });

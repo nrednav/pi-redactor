@@ -7,6 +7,9 @@ export const MAX_PATTERN_LENGTH = 1000;
 /** The absolute ceiling for user-configurable pattern limits. */
 export const MAX_CONFIGURABLE_LIMIT = 1000;
 
+/** Default review cadence for the stale-pattern warning, in days. 0 disables it. */
+export const DEFAULT_STALE_WARNING_DAYS = 90;
+
 export class ContractViolation extends Error {
   constructor(
     public readonly type: "precondition" | "postcondition" | "invariant",
@@ -322,10 +325,16 @@ export class RedactorConfig {
   private constructor(
     readonly isEnabled: boolean,
     readonly patterns: PatternList,
-    readonly maxPatterns: number
+    readonly maxPatterns: number,
+    readonly staleWarningDays: number
   ) {}
 
-  static create(isEnabled: boolean, patterns: PatternList, maxPatterns: number = MAX_PATTERNS): RedactorConfig {
+  static create(
+    isEnabled: boolean,
+    patterns: PatternList,
+    maxPatterns: number = MAX_PATTERNS,
+    staleWarningDays: number = DEFAULT_STALE_WARNING_DAYS
+  ): RedactorConfig {
     invariant(typeof isEnabled === "boolean", "isEnabled must be boolean");
 
     require(
@@ -334,11 +343,22 @@ export class RedactorConfig {
       "RedactorConfig.create"
     );
 
-    return new RedactorConfig(isEnabled, patterns, maxPatterns);
+    require(
+      Number.isInteger(staleWarningDays) && staleWarningDays >= 0,
+      "staleWarningDays must be a non-negative integer",
+      "RedactorConfig.create"
+    );
+
+    return new RedactorConfig(isEnabled, patterns, maxPatterns, staleWarningDays);
   }
 
   static createDefault(): RedactorConfig {
-    return new RedactorConfig(true, PatternList.createEmpty(), MAX_PATTERNS);
+    return new RedactorConfig(
+      true,
+      PatternList.createEmpty(),
+      MAX_PATTERNS,
+      DEFAULT_STALE_WARNING_DAYS
+    );
   }
 
   /**
@@ -367,6 +387,20 @@ export class RedactorConfig {
       if (maxPatterns !== rawMaxPatterns) {
         warnings.push(
           `maxPatterns value ${rawMaxPatterns} was clamped to ${maxPatterns} (valid range: 1–${MAX_CONFIGURABLE_LIMIT})`
+        );
+      }
+    }
+
+    let staleWarningDays = DEFAULT_STALE_WARNING_DAYS;
+
+    if (typeof configRecord.staleWarningDays === "number") {
+      const rawStaleWarningDays = configRecord.staleWarningDays;
+
+      staleWarningDays = Math.max(0, Math.floor(rawStaleWarningDays));
+
+      if (staleWarningDays !== rawStaleWarningDays) {
+        warnings.push(
+          `staleWarningDays value ${rawStaleWarningDays} was clamped to ${staleWarningDays} (must be a non-negative integer; 0 disables stale warnings)`
         );
       }
     }
@@ -412,22 +446,32 @@ export class RedactorConfig {
     }
 
     return {
-      config: RedactorConfig.create(isEnabled, PatternList.from(validPatterns), maxPatterns),
+      config: RedactorConfig.create(
+        isEnabled,
+        PatternList.from(validPatterns),
+        maxPatterns,
+        staleWarningDays
+      ),
       warnings,
     };
   }
 
   enable(): RedactorConfig {
-    return new RedactorConfig(true, this.patterns, this.maxPatterns);
+    return new RedactorConfig(true, this.patterns, this.maxPatterns, this.staleWarningDays);
   }
 
   disable(): RedactorConfig {
-    return new RedactorConfig(false, this.patterns, this.maxPatterns);
+    return new RedactorConfig(false, this.patterns, this.maxPatterns, this.staleWarningDays);
   }
 
   addPattern(pattern: Pattern): RedactorConfig {
     const newPatterns = this.patterns.add(pattern, this.maxPatterns);
-    const result = new RedactorConfig(this.isEnabled, newPatterns, this.maxPatterns);
+    const result = new RedactorConfig(
+      this.isEnabled,
+      newPatterns,
+      this.maxPatterns,
+      this.staleWarningDays
+    );
 
     ensure(
       result.patterns.length === this.patterns.length + 1,
@@ -439,11 +483,21 @@ export class RedactorConfig {
   }
 
   removePattern(original: string): RedactorConfig {
-    return new RedactorConfig(this.isEnabled, this.patterns.remove(original), this.maxPatterns);
+    return new RedactorConfig(
+      this.isEnabled,
+      this.patterns.remove(original),
+      this.maxPatterns,
+      this.staleWarningDays
+    );
   }
 
   clearPatterns(): RedactorConfig {
-    return new RedactorConfig(this.isEnabled, PatternList.createEmpty(), this.maxPatterns);
+    return new RedactorConfig(
+      this.isEnabled,
+      PatternList.createEmpty(),
+      this.maxPatterns,
+      this.staleWarningDays
+    );
   }
 
   setMaxPatterns(newLimit: number): RedactorConfig {
@@ -459,7 +513,17 @@ export class RedactorConfig {
       "RedactorConfig.setMaxPatterns"
     );
 
-    return new RedactorConfig(this.isEnabled, this.patterns, newLimit);
+    return new RedactorConfig(this.isEnabled, this.patterns, newLimit, this.staleWarningDays);
+  }
+
+  setStaleWarningDays(days: number): RedactorConfig {
+    require(
+      Number.isInteger(days) && days >= 0,
+      "staleWarningDays must be a non-negative integer",
+      "RedactorConfig.setStaleWarningDays"
+    );
+
+    return new RedactorConfig(this.isEnabled, this.patterns, this.maxPatterns, days);
   }
 
   redact(text: string): RedactionResult {
@@ -517,9 +581,15 @@ export class RedactorConfig {
   toJSON(): {
     enabled: boolean;
     maxPatterns: number;
+    staleWarningDays: number;
     patterns: Array<{ original: string; replacement: string; createdAt: number }>;
   } {
-    return { enabled: this.isEnabled, maxPatterns: this.maxPatterns, patterns: this.patterns.toJSON() };
+    return {
+      enabled: this.isEnabled,
+      maxPatterns: this.maxPatterns,
+      staleWarningDays: this.staleWarningDays,
+      patterns: this.patterns.toJSON(),
+    };
   }
 }
 
@@ -531,6 +601,7 @@ export type ParsedCommand =
   | { type: "enable" }
   | { type: "disable" }
   | { type: "limit"; value: number }
+  | { type: "stale"; value: number }
   | { type: "help" }
   | { type: "invalid"; reason: string };
 
@@ -561,6 +632,7 @@ const HELP_TEXT = [
   "  /redact on                       Enable redaction",
   "  /redact off                      Disable redaction",
   "  /redact limit <n>                Set max pattern count (default 100, max 1000)",
+  "  /redact stale <n>                Set stale warning age in days (0 disables, default 90)",
   "",
   `Limit: ${MAX_PATTERNS} by default (configurable up to ${MAX_CONFIGURABLE_LIMIT} via /redact limit <n>).`,
   "",
@@ -617,6 +689,18 @@ export function parseCommand(args: string): ParsedCommand {
       }
 
       return { type: "limit", value };
+    }
+    case "stale": {
+      const value = parseInt(rest, 10);
+
+      if (!rest || isNaN(value)) {
+        return {
+          type: "invalid",
+          reason: "Usage: /redact stale <number> (days; 0 disables stale warnings)",
+        };
+      }
+
+      return { type: "stale", value };
     }
     default:      return { type: "help" };
   }
@@ -848,6 +932,54 @@ export function executeCommand(
         }
 
         return { config: newConfig, effects };
+      } catch (error) {
+        return {
+          config,
+          effects: [
+            {
+              type: "notify",
+              message: error instanceof ContractViolation ? error.condition : String(error),
+              level: "error",
+            },
+          ],
+        };
+      }
+    }
+
+    case "stale": {
+      const describeStaleWarningDays = (days: number): string =>
+        days === 0 ? "disabled" : `${days} days`;
+
+      if (command.value === config.staleWarningDays) {
+        return {
+          config,
+          effects: [
+            {
+              type: "notify",
+              message: `Stale warning age is already ${describeStaleWarningDays(config.staleWarningDays)}.`,
+              level: "info",
+            },
+          ],
+        };
+      }
+
+      try {
+        const newConfig = config.setStaleWarningDays(command.value);
+
+        return {
+          config: newConfig,
+          effects: [
+            { type: "save", config: newConfig },
+            {
+              type: "notify",
+              message:
+                `Stale warning age updated: ${describeStaleWarningDays(config.staleWarningDays)}` +
+                ` → ${describeStaleWarningDays(command.value)}`,
+              level: "success",
+            },
+            { type: "updateStatus", config: newConfig },
+          ],
+        };
       } catch (error) {
         return {
           config,

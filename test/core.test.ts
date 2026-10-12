@@ -12,6 +12,7 @@ import {
   MAX_PATTERNS,
   MAX_PATTERN_LENGTH,
   MAX_CONFIGURABLE_LIMIT,
+  DEFAULT_STALE_WARNING_DAYS,
   type ConfigParseResult,
   type ContentBlock,
   type ContentRedactionResult,
@@ -1231,6 +1232,93 @@ describe("RedactorConfig.maxPatterns", () => {
   });
 });
 
+describe("RedactorConfig.staleWarningDays", () => {
+  it("defaults to DEFAULT_STALE_WARNING_DAYS", () => {
+    const config = RedactorConfig.createDefault();
+    expect(config.staleWarningDays).toBe(DEFAULT_STALE_WARNING_DAYS);
+  });
+
+  it("preserves staleWarningDays through enable/disable/clear/remove/add/setMaxPatterns", () => {
+    const config = RedactorConfig.create(true, PatternList.createEmpty(), MAX_PATTERNS, 42)
+      .addPattern(Pattern.create("secret", "[X]"));
+
+    expect(config.enable().staleWarningDays).toBe(42);
+    expect(config.disable().staleWarningDays).toBe(42);
+    expect(config.clearPatterns().staleWarningDays).toBe(42);
+    expect(config.removePattern("secret").staleWarningDays).toBe(42);
+    expect(config.addPattern(Pattern.create("other", "[Y]")).staleWarningDays).toBe(42);
+    expect(config.setMaxPatterns(50).staleWarningDays).toBe(42);
+  });
+
+  it("setStaleWarningDays returns a new config with the updated value", () => {
+    const config = RedactorConfig.createDefault();
+    const updated = config.setStaleWarningDays(0);
+
+    expect(updated.staleWarningDays).toBe(0);
+    expect(config.staleWarningDays).toBe(DEFAULT_STALE_WARNING_DAYS); // original unchanged
+  });
+
+  it("setStaleWarningDays rejects negative and non-integer values", () => {
+    const config = RedactorConfig.createDefault();
+
+    expect(() => config.setStaleWarningDays(-1)).toThrow(ContractViolation);
+    expect(() => config.setStaleWarningDays(1.5)).toThrow(ContractViolation);
+  });
+
+  it("create rejects negative and non-integer staleWarningDays", () => {
+    expect(() =>
+      RedactorConfig.create(true, PatternList.createEmpty(), MAX_PATTERNS, -1)
+    ).toThrow(ContractViolation);
+
+    expect(() =>
+      RedactorConfig.create(true, PatternList.createEmpty(), MAX_PATTERNS, 2.5)
+    ).toThrow(ContractViolation);
+  });
+
+  it("parseJSON reads staleWarningDays from raw JSON", () => {
+    const { config } = RedactorConfig.parseJSON({
+      enabled: true,
+      staleWarningDays: 30,
+      patterns: [],
+    });
+
+    expect(config.staleWarningDays).toBe(30);
+  });
+
+  it("parseJSON defaults to DEFAULT_STALE_WARNING_DAYS when absent", () => {
+    const { config } = RedactorConfig.parseJSON({ enabled: true, patterns: [] });
+
+    expect(config.staleWarningDays).toBe(DEFAULT_STALE_WARNING_DAYS);
+  });
+
+  it("parseJSON clamps negative and fractional staleWarningDays and warns", () => {
+    const negative = RedactorConfig.parseJSON({
+      enabled: true,
+      staleWarningDays: -5,
+      patterns: [],
+    });
+
+    expect(negative.config.staleWarningDays).toBe(0);
+    expect(negative.warnings.some((w) => w.includes("clamped"))).toBe(true);
+
+    const fractional = RedactorConfig.parseJSON({
+      enabled: true,
+      staleWarningDays: 1.5,
+      patterns: [],
+    });
+
+    expect(fractional.config.staleWarningDays).toBe(1);
+    expect(fractional.warnings.some((w) => w.includes("clamped"))).toBe(true);
+  });
+
+  it("toJSON includes staleWarningDays field", () => {
+    const config = RedactorConfig.create(true, PatternList.createEmpty(), MAX_PATTERNS, 0);
+    const json = config.toJSON();
+
+    expect(json.staleWarningDays).toBe(0);
+  });
+});
+
 describe("parseCommand()", () => {
   it("parses 'add foo' as add with default replacement", () => {
     const command = parseCommand("add foo");
@@ -1337,6 +1425,46 @@ describe("parseCommand()", () => {
 
   it("returns invalid for 'limit abc' (non-numeric)", () => {
     const command = parseCommand("limit abc");
+
+    expect(command.type).toBe("invalid");
+
+    if (command.type === "invalid") {
+      expect(command.reason).toContain("Usage:");
+    }
+  });
+
+  it("parses 'stale 0' as stale command with value 0", () => {
+    const command = parseCommand("stale 0");
+
+    expect(command.type).toBe("stale");
+
+    if (command.type === "stale") {
+      expect(command.value).toBe(0);
+    }
+  });
+
+  it("parses 'stale 45' as stale command with value 45", () => {
+    const command = parseCommand("stale 45");
+
+    expect(command.type).toBe("stale");
+
+    if (command.type === "stale") {
+      expect(command.value).toBe(45);
+    }
+  });
+
+  it("returns invalid for 'stale' without argument", () => {
+    const command = parseCommand("stale");
+
+    expect(command.type).toBe("invalid");
+
+    if (command.type === "invalid") {
+      expect(command.reason).toContain("Usage:");
+    }
+  });
+
+  it("returns invalid for 'stale abc' (non-numeric)", () => {
+    const command = parseCommand("stale abc");
 
     expect(command.type).toBe("invalid");
 
@@ -1585,6 +1713,67 @@ describe("executeCommand()", () => {
     it("returns no-op info message when limit is already the same", () => {
       const config = RedactorConfig.createDefault();
       const result = executeCommand({ type: "limit", value: MAX_PATTERNS }, config);
+
+      expect(result.config).toBe(config); // same reference
+      expect(result.effects.length).toBe(1);
+
+      const notify = result.effects[0];
+
+      expect(notify.type).toBe("notify");
+
+      if (notify.type === "notify") {
+        expect(notify.level).toBe("info");
+        expect(notify.message).toContain("already");
+      }
+    });
+  });
+
+  describe("stale command", () => {
+    it("updates staleWarningDays and emits save + success + updateStatus", () => {
+      const config = RedactorConfig.createDefault();
+      const result = executeCommand({ type: "stale", value: 0 }, config);
+
+      expect(result.config.staleWarningDays).toBe(0);
+
+      const effectTypes = result.effects.map((e) => e.type);
+
+      expect(effectTypes).toContain("save");
+      expect(effectTypes).toContain("updateStatus");
+
+      const successNotify = result.effects.find(
+        (e) => e.type === "notify" && "level" in e && e.level === "success"
+      );
+
+      expect(successNotify).toBeDefined();
+
+      if (successNotify && successNotify.type === "notify") {
+        expect(successNotify.message).toContain("disabled");
+      }
+    });
+
+    it("returns error effect for a negative value", () => {
+      const config = RedactorConfig.createDefault();
+      const result = executeCommand({ type: "stale", value: -1 }, config);
+
+      expect(result.config.staleWarningDays).toBe(DEFAULT_STALE_WARNING_DAYS); // unchanged
+      expect(result.effects.length).toBe(1);
+
+      const notify = result.effects[0];
+
+      expect(notify.type).toBe("notify");
+
+      if (notify.type === "notify") {
+        expect(notify.level).toBe("error");
+        expect(notify.message).toContain("non-negative integer");
+      }
+    });
+
+    it("returns no-op info message when value is already the same", () => {
+      const config = RedactorConfig.createDefault();
+      const result = executeCommand(
+        { type: "stale", value: DEFAULT_STALE_WARNING_DAYS },
+        config
+      );
 
       expect(result.config).toBe(config); // same reference
       expect(result.effects.length).toBe(1);

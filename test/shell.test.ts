@@ -195,6 +195,7 @@ describe("shell.ts", () => {
       expect(typeof parsed.checksum).toBe("string");
       expect(parsed.checksum).toHaveLength(64);
       expect(parsed.data.enabled).toBe(true);
+      expect(parsed.data.staleWarningDays).toBe(90);
       expect(parsed.data.patterns).toHaveLength(1);
       expect(parsed.data.patterns[0].original).toBe("test");
     });
